@@ -1,146 +1,124 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List
+from typing import Optional, List
 from datetime import datetime
 
 app = FastAPI()
 
-# --- CORS 설정 (Netlify + 기타 전부 허용) ---
-origins = [
-    "http://127.0.0.1:8000",
-    "http://localhost:8000",
-    "https://upsourcing-tool.netlify.app",
-    "*",  # 귀찮으니까 일단 전부 허용
-]
-
+# CORS: 프론트 도메인 포함해서 모두 허용 (개발 편하게)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------- 데이터 모델 ----------
 
-class CollectRequest(BaseModel):
-    keyword: str
-    min_price: int
-    max_price: int
-
-
+# -----------------------------------
+# 데이터 모델
+# -----------------------------------
 class Mall(BaseModel):
     id: int
     name: str
-    link: str
-    logo: str | None = None
-    collected_at: datetime
+    keyword: Optional[str] = None
+    logo_url: Optional[str] = None
+    last_collected_at: Optional[datetime] = None
 
 
-# 메모리 안에서만 쓰는 임시 DB
+class CollectRequest(BaseModel):
+    keyword: str
+    min_price: Optional[int] = None
+    max_price: Optional[int] = None
+
+
+# 메모리 안에만 임시 저장 (DB 대신)
 malls_db: List[Mall] = []
+next_id: int = 1
 
 
-# ---------- 헬스체크 ----------
-
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "time": datetime.utcnow().isoformat(),
-    }
-
-
-# ---------- BEST 소싱 수집 (POST) ----------
-
-@app.post("/api/collect/best")
-def collect_best(req: CollectRequest):
+# -----------------------------------
+# 쇼핑몰 목록 조회
+# GET /api/malls
+# -----------------------------------
+@app.get("/api/malls")
+def list_malls(sort_by: str = "recent", keyword: str = "") -> List[Mall]:
     """
-    스마트스토어 BEST 수집 (테스트용 더미 데이터)
-    실제 크롤링 대신, keyword 섞어서 가짜 쇼핑몰 5개 만들어 저장
+    sort_by: recent, name, oldest
+    keyword: 이름/키워드에 포함되는 문자열
     """
-    global malls_db
-    malls_db = []  # 요청 올 때마다 초기화
+    # 키워드 필터
+    if keyword:
+        k = keyword.lower()
+        filtered = [
+            m
+            for m in malls_db
+            if k in m.name.lower() or (m.keyword and k in m.keyword.lower())
+        ]
+    else:
+        filtered = list(malls_db)
 
-    base_link = "https://smartstore.naver.com"
+    # 정렬
+    if sort_by == "name":
+        filtered.sort(key=lambda m: m.name)
+    elif sort_by == "oldest":
+        filtered.sort(
+            key=lambda m: m.last_collected_at or datetime.fromtimestamp(0)
+        )
+    else:  # recent (최신 순)
+        filtered.sort(
+            key=lambda m: m.last_collected_at or datetime.fromtimestamp(0),
+            reverse=True,
+        )
 
-    dummy_raw = [
-        {
-            "id": 1,
-            "name": f"{req.keyword} 감성 여성의류샵",
-            "link": f"{base_link}/example1",
-            "logo": "https://via.placeholder.com/64?text=SHOP1",
-        },
-        {
-            "id": 2,
-            "name": f"{req.keyword} 니트 전문몰",
-            "link": f"{base_link}/example2",
-            "logo": "https://via.placeholder.com/64?text=SHOP2",
-        },
-        {
-            "id": 3,
-            "name": f"{req.keyword} 해외직구 편집샵",
-            "link": f"{base_link}/example3",
-            "logo": "https://via.placeholder.com/64?text=SHOP3",
-        },
-        {
-            "id": 4,
-            "name": f"{req.keyword} 데일리룩 쇼핑몰",
-            "link": f"{base_link}/example4",
-            "logo": "https://via.placeholder.com/64?text=SHOP4",
-        },
-        {
-            "id": 5,
-            "name": f"{req.keyword} 하이브랜드 셀렉샵",
-            "link": f"{base_link}/example5",
-            "logo": "https://via.placeholder.com/64?text=SHOP5",
-        },
-    ]
+    return filtered
+
+
+# -----------------------------------
+# BEST 소싱 (더미 수집)
+# POST /api/smartstore/collect
+# -----------------------------------
+@app.post("/api/smartstore/collect")
+def collect_smartstore(req: CollectRequest):
+    """
+    실제 크롤링 대신,
+    keyword 기준으로 더미 쇼핑몰 3개를 생성해서 malls_db 에 추가.
+    """
+    global next_id, malls_db
 
     now = datetime.utcnow()
-    malls_db = [
-        Mall(
-            id=item["id"],
-            name=item["name"],
-            link=item["link"],
-            logo=item["logo"],
-            collected_at=now,
-        )
-        for item in dummy_raw
+
+    dummy_names = [
+        f"{req.keyword} 스토어 1",
+        f"{req.keyword} 스토어 2",
+        f"{req.keyword} 스토어 3",
     ]
 
+    for name in dummy_names:
+        mall = Mall(
+            id=next_id,
+            name=name,
+            keyword=req.keyword,
+            logo_url=None,
+            last_collected_at=now,
+        )
+        malls_db.append(mall)
+        next_id += 1
+
     return {
-        "ok": True,
-        "count": len(malls_db),
+        "detail": "ok",
+        "added": len(dummy_names),
         "keyword": req.keyword,
-        "collected_at": now.isoformat(),
     }
 
 
-# ---------- BEST 소싱 수집 (GET 버전) ----------
-# 혹시 프론트에서 GET으로 호출해도 되게 둘 다 열어둠
-
-@app.get("/api/collect/best")
-def collect_best_get(
-    keyword: str,
-    min_price: int = 0,
-    max_price: int = 999999999,
-):
-    req = CollectRequest(keyword=keyword, min_price=min_price, max_price=max_price)
-    return collect_best(req)
-
-
-# ---------- 수집된 쇼핑몰 목록 ----------
-
-@app.get("/api/malls", response_model=List[Mall])
-def list_malls():
-    return malls_db
-
-
-# ---------- 수집된 쇼핑몰 전체 삭제 ----------
-
+# -----------------------------------
+# 전체 쇼핑몰 삭제
+# DELETE /api/malls
+# -----------------------------------
 @app.delete("/api/malls")
 def clear_malls():
-    malls_db.clear()
-    return {"ok": True, "message": "모든 쇼핑몰이 삭제되었습니다."}
+    global malls_db
+    malls_db = []
+    return {"detail": "cleared"}
